@@ -14,6 +14,7 @@ import simplefft
 import invertcontrast
 import analyzeflow
 import spectroscopy
+import epsi
 
 class Server:
     """
@@ -111,6 +112,9 @@ class Server:
             elif (config == "spectroscopy"):
                 logging.info("Starting spectroscopy processing based on config")
                 spectroscopy.process(connection, configAdditional, metadata)
+            elif (config == "epsi"):
+                logging.info("Starting epsi processing based on config")
+                epsi.process(connection, configAdditional, metadata)
             elif (config == "analyzeflow"):
                 logging.info("Starting analyzeflow processing based on config")
                 analyzeflow.process(connection, configAdditional, metadata)

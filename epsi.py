@@ -51,45 +51,50 @@ def process(connection, config, metadata):
             # Raw k-space data messages
             # ----------------------------------------------------------
             if isinstance(item, ismrmrd.Acquisition):
-                # Accumulate all imaging readouts in a group
-                if (not item.is_flag_set(ismrmrd.ACQ_IS_NOISE_MEASUREMENT) and
-                    not item.is_flag_set(ismrmrd.ACQ_IS_PARALLEL_CALIBRATION) and
-                    not item.is_flag_set(ismrmrd.ACQ_IS_PHASECORR_DATA) and
-                    not item.is_flag_set(ismrmrd.ACQ_IS_NAVIGATION_DATA)):
-                    acqGroup.append(item)
+
+                #  Write out all flags to see what's what
+                nAve = int(metadata.encoding[0].encodingLimits.average.maximum - metadata.encoding[0].encodingLimits.average.minimum) + 1
+                nLin = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_1.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_1.minimum) + 1
+                nSeg = int(metadata.encoding[0].encodingLimits.segment.maximum - metadata.encoding[0].encodingLimits.segment.minimum) + 1
+                nRO = mrdhelper.get_userParameterLong_value(metadata, 'SpecVectorSize')
+                ave = item.idx.average
+                lin = item.idx.kspace_encode_step_1
+                seg = item.idx.segment
+
+                if nRO is None:
+                    nRO = int((item.data.shape[1] - item.discard_pre - item.discard_post) / 2)  # 2x readout oversampling
+                    logging.warning("Could not find SpecVectorSize in header -- using size %d from data", nRO)
+
+                logging.info("MRD header: %d/%d avg, %d/%d lin, %d/%d seg" % (ave, nAve, lin, nLin, seg, nSeg))
+
+                bob = 10
+
+                bob = 3/0
  
-                # When this criteria is met, run process_raw() on the accumulated
-                # data, which returns images that are sent back to the client.
-                if item.is_flag_set(ismrmrd.ACQ_LAST_IN_SLICE):
-                    logging.info("Processing a group of k-space data")
-                    image = process_raw(acqGroup, connection, config, metadata)
-                    connection.send_image(image)
-                    acqGroup = []
- 
-            # ----------------------------------------------------------
-            # Image data messages
-            # ----------------------------------------------------------
-            elif isinstance(item, ismrmrd.Image):
-                # Only process magnitude images -- send phase images back without modification (fallback for images with unknown type)
-                if (item.image_type is ismrmrd.IMTYPE_MAGNITUDE) or (item.image_type == 0):
-                    imgGroup.append(item)
-                else:
-                    tmpMeta = ismrmrd.Meta.deserialize(item.attribute_string)
-                    tmpMeta['Keep_image_geometry']    = 1
-                    item.attribute_string = tmpMeta.serialize()
- 
-                    connection.send_image(item)
-                    continue
- 
-                # When this criteria is met, run process_group() on the accumulated
-                # data, which returns images that are sent back to the client.
-                # e.g. when the series number changes:
-                if item.image_series_index != currentSeries:
-                    logging.info("Processing a group of images because series index changed to %d", item.image_series_index)
-                    currentSeries = item.image_series_index
-                    image = process_image(imgGroup, connection, config, metadata)
-                    connection.send_image(image)
-                    imgGroup = []
+            # # ----------------------------------------------------------
+            # # Image data messages
+            # # ----------------------------------------------------------
+            # elif isinstance(item, ismrmrd.Image):
+            #     # Only process magnitude images -- send phase images back without modification (fallback for images with unknown type)
+            #     if (item.image_type is ismrmrd.IMTYPE_MAGNITUDE) or (item.image_type == 0):
+            #         imgGroup.append(item)
+            #     else:
+            #         tmpMeta = ismrmrd.Meta.deserialize(item.attribute_string)
+            #         tmpMeta['Keep_image_geometry']    = 1
+            #         item.attribute_string = tmpMeta.serialize()
+            #
+            #         connection.send_image(item)
+            #         continue
+            #
+            #     # When this criteria is met, run process_group() on the accumulated
+            #     # data, which returns images that are sent back to the client.
+            #     # e.g. when the series number changes:
+            #     if item.image_series_index != currentSeries:
+            #         logging.info("Processing a group of images because series index changed to %d", item.image_series_index)
+            #         currentSeries = item.image_series_index
+            #         image = process_image(imgGroup, connection, config, metadata)
+            #         connection.send_image(image)
+            #         imgGroup = []
  
             # ----------------------------------------------------------
             # Waveform data messages
