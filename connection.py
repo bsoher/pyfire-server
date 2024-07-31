@@ -305,7 +305,8 @@ class Connection:
     def read_acquisition(self):
         self.recvAcqs += 1
         if (self.recvAcqs == 1) or (self.recvAcqs % 100 == 0):
-            logging.info("<-- Received MRD_MESSAGE_ISMRMRD_ACQUISITION (1008) (total: %d)", self.recvAcqs)
+            bob = 10
+            #logging.info("<-- Received MRD_MESSAGE_ISMRMRD_ACQUISITION (1008) (total: %d)", self.recvAcqs)
 
         acq = ismrmrd.Acquisition.deserialize_from(self.read)
 

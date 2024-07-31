@@ -15,7 +15,9 @@ from time import perf_counter
 import matplotlib.pyplot as plt
 
 # Folder for debug output files
-debugFolder = "/tmp/share/debug"
+# debugFolder = "/tmp/share/debug"
+debugFolder = "D:\\temp\\debug_fire"
+
  
 def process(connection, config, metadata):
     logging.info("Config: \n%s", config)
@@ -52,25 +54,51 @@ def process(connection, config, metadata):
             # ----------------------------------------------------------
             if isinstance(item, ismrmrd.Acquisition):
 
+                # csi_se.cpp code re. encoding indices
+                #
+                # REP - repeats?  - m_adc1.getMDH().setCrep(k);
+                # ACQ - averages? - m_adc1.getMDH().setCacq(j); // averages
+                # LIN - YPhase 50 - m_adc1.getMDH().setClin((short) m_sh_2nd_csi_addr[i] + m_sh_2nd_csi_addr_offset);
+                # PAR - ZPhase 18 - m_adc1.getMDH().setCpar((short) m_sh_3rd_csi_addr[i] + m_sh_3rd_csi_addr_offset);
+                # m_adc1.getMDH().setFirstScanInSlice(!i && !j);
+                # m_adc1.getMDH().setLastScanInSlice(i == (m_lN_csi_encodes - 1) && j == (m_sh_csi_weight[i] - 1));
+                # m_adc1.getMDH().addToEvalInfoMask (MDH_PHASCOR);
+                #
+                # m_adc1.getMDH().setEvalInfoMask(MDH_ONLINE);
+                # ECO - 0/1 Water/Metab m_adc1.getMDH().setCeco(0);     WS vs Water Non-Suppressed
+                # SEG - 100 (50 w/o OS) m_adc1.getMDH().setCseg(ADCctr + +);        EPI RO segment
+                # m_adc1.getMDH().addToEvalInfoMask(MDH_LASTMEASUREDLINE);
+
                 #  Write out all flags to see what's what
-                nAve = int(metadata.encoding[0].encodingLimits.average.maximum - metadata.encoding[0].encodingLimits.average.minimum) + 1
-                nLin = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_1.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_1.minimum) + 1
-                nSeg = int(metadata.encoding[0].encodingLimits.segment.maximum - metadata.encoding[0].encodingLimits.segment.minimum) + 1
-                nRO = mrdhelper.get_userParameterLong_value(metadata, 'SpecVectorSize')
-                ave = item.idx.average
+                neco = int(metadata.encoding[0].encodingLimits.contrast.maximum - metadata.encoding[0].encodingLimits.contrast.minimum) + 1
+                npar = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_2.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_2.minimum) + 1
+                nlin = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_1.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_1.minimum) + 1
+                nseg = int(metadata.encoding[0].encodingLimits.segment.maximum - metadata.encoding[0].encodingLimits.segment.minimum) + 1
+                nave = int(metadata.encoding[0].encodingLimits.average.maximum - metadata.encoding[0].encodingLimits.average.minimum) + 1
+                nrep = int(metadata.encoding[0].encodingLimits.repetition.maximum - metadata.encoding[0].encodingLimits.repetition.minimum) + 1
+
+                eco = item.idx.contrast
+                par = item.idx.kspace_encode_step_2
                 lin = item.idx.kspace_encode_step_1
                 seg = item.idx.segment
+                ave = item.idx.average
+                rep = item.idx.repetition
 
-                if nRO is None:
-                    nRO = int((item.data.shape[1] - item.discard_pre - item.discard_post) / 2)  # 2x readout oversampling
-                    logging.warning("Could not find SpecVectorSize in header -- using size %d from data", nRO)
+                nro = mrdhelper.get_userParameterLong_value(metadata, 'SpecVectorSize')
+                if nro is None:
+                    nro = int((item.data.shape[1] - item.discard_pre - item.discard_post) / 2)  # 2x readout oversampling
+                    logging.warning("Could not find SpecVectorSize in header -- using size %d from data", nro)
 
-                logging.info("MRD header: %d/%d avg, %d/%d lin, %d/%d seg" % (ave, nAve, lin, nLin, seg, nSeg))
+                lines = dump_active_flags(item, prnt=False)
+
+                if seg == 511 or seg == 1023 or lines != 'No active flags.':
+                    logging.info("----------------------------------------------------------------------------------------")
+                    logging.info("MRD header: %d/%d eco, %d/%d par, %d/%d lin, %d/%d seg, %d/%d avg, %d/%d rep" % (eco, neco, par, npar, lin, nlin, seg, nseg, ave, nave, rep, nrep))
+                    if lines != 'No active flags.':
+                        logging.info(lines)
 
                 bob = 10
 
-                bob = 3/0
- 
             # # ----------------------------------------------------------
             # # Image data messages
             # # ----------------------------------------------------------
@@ -478,7 +506,7 @@ def dump_flags(item):
     lines = "\n".join(lines)
     print(lines)
 
-def dump_active_flags(item):
+def dump_active_flags(item, prnt=False):
     lines = []
 
     if item.is_flag_set(ismrmrd.ACQ_FIRST_IN_ENCODE_STEP1): lines.append("ACQ_IS_DUMMYSCAN_DATA                  = True")
@@ -529,5 +557,9 @@ def dump_active_flags(item):
         lines = 'No active flags.'
     else:
         lines = "\n".join(lines)
-    print(lines)
+
+    if prnt == True:
+        print(lines)
+    else:
+        return lines
 
