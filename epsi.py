@@ -1,5 +1,6 @@
 import ismrmrd
 import os
+import sys
 import itertools
 import logging
 import traceback
@@ -14,12 +15,146 @@ import constants
 from time import perf_counter
 import matplotlib.pyplot as plt
 
+# bjs imports
+from logging import FileHandler, Formatter
+
+BJS_DEBUG_PATH = "D:\\temp\\debug_fire\\"
+LOG_FORMAT = ('%(asctime)s | %(levelname)s | %(message)s')
+
 # Folder for debug output files
 # debugFolder = "/tmp/share/debug"
 debugFolder = "D:\\temp\\debug_fire"
 
- 
+logger_bjs = logging.getLogger("bjs_log")
+logger_bjs.setLevel(logging.DEBUG)
+
+file_handler = FileHandler(os.path.join(BJS_DEBUG_PATH, 'log_epsi_out.txt'))
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(Formatter(LOG_FORMAT))
+logger_bjs.addHandler(file_handler)
+
+
+# stdout_handler = logging.StreamHandler(sys.stdout)
+# stdout_handler.setLevel(logging.DEBUG)
+# stdout_handler.setFormatter(Formatter(LOG_FORMAT))
+# logger_bjs.addHandler(stdout_handler)
+
+
+class BlockEpsi:
+    """
+    Building block object used to create a list of MIDAS processing blocks.
+
+    This object represents the settings and results involved in processing
+    data for EPSI.
+
+    In here we also package all the functionality needed to save and recall
+    these values to/from an XML node.
+
+    """
+    XML_VERSION = "2.0.0"   # allows us to change XML I/O in the future
+
+    def __init__(self, attributes=None):
+
+        # Settings - algorithm flags and parameters
+
+        self.trajectory_filename    = r"g100_r130_sim.dat"      # expand on run
+        self.echo_drift_corr        = 1
+        self.frequency_drift_corr   = 2
+        self.frequency_drift_value  = 0.000
+        self.invert_z               = True
+        self.swap_lr                = False
+        self.echo_output            = 0
+        self.echo_average_fix       = True
+        self.retain_input_files     = False
+        self.plot_echo_positions    = True
+        self.nx_resample            = 50
+        self.apply_kx_phase_corr    = 1         # deprecated, always done if echoShiftsOpt set
+
+        # multiprocessing settings
+        self.single_process     = True          # use multiprocessing or not
+        self.nprocess           = 1             # number of cores to use
+        self.chunksize          = None          # alignment with other pymidas modules
+
+        # data information
+        self.nt                 = None          # these are defaults for Siemens
+        self.nx                 = None
+        self.ny                 = 50
+        self.nz                 = 18
+        self.os                 = 2
+        self.os_orig            = 2
+        self.sw                 = 2500.0
+        self.nx_out             = 50
+        self.full_traj          = False          # deprecated?
+        self.sampling_interval  = 4000
+
+        # dynamically set
+        self.do_setup           = True      # setup arrays first off
+        
+        self.fovx               = 280.0
+        self.fovy               = 280.0
+        self.fovz               = 180.0
+        self.ncha               = 1
+        self.n_process_nodes    = 1
+        self.data_id_array      = []
+        self.nx_resample        = 50
+        self.byte_order         = ''
+        self.num_phencs         = 1
+        self.nd                 = 1
+        self.td                 = 1.0
+        self.scan_data          = ''
+        self.mrdata_fnames      = []
+
+        self.series_label       = 'SI_REF'
+        self.pix_spacing_1      = 5.6
+        self.pix_spacing_2      = 5.6
+        self.pix_spacing_3      = 10.0
+        self.nchannels          = 12
+        self.mrdata             = None
+        self.out_filename       = ''
+        self.save_output        = True
+        self.channel            = ''
+        self.csa_pad_length     = 0
+        self.fin_names          = []
+        self.fout_names         = []
+        self.echo_shifts_slope  = None
+        self.echo_shifts        = None
+        self.echo_phases        = None
+        self.Is_GE              = False
+
+        # data storage
+
+        self.data_init_met = None
+        self.data_init_wat = None
+        self.data = []
+
+    @property
+    def n_channels(self):
+        return self.ncha
+    @n_channels.setter
+    def n_channels(self, value):
+        self.ncha = value
+
+
 def process(connection, config, metadata):
+    """
+        csi_se.cpp code re. encoding indices
+
+        PAR - ZPhase 18 - m_adc1.getMDH().setCpar((short) m_sh_3rd_csi_addr[i] + m_sh_3rd_csi_addr_offset);
+        LIN - YPhase 50 - m_adc1.getMDH().setClin(SpecVectorSizeshort) m_sh_2nd_csi_addr[i] + m_sh_2nd_csi_addr_offset);
+        ECO - 0/1 Water/Metab m_adc1.getMDH().setCeco(0);     WS vs Water Non-Suppressed
+        SEG - 100 (50 w/o OS) m_adc1.getMDH().setCseg(ADCctr + +);        EPI RO segment
+        m_adc1.getMDH().setFirstScanInSlice(!i && !j);
+        m_adc1.getMDH().setLastScanInSlice(i == (m_lN_csi_encodes - 1) && j == (m_sh_csi_weight[i] - 1));
+        m_adc1.getMDH().addToEvalInfoMask (MDH_PHASCOR);
+
+    """
+
+    block = BlockEpsi()
+
+    block.nz = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_2.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_2.minimum) + 1
+    block.ny = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_1.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_1.minimum) + 1
+    block.nt = mrdhelper.get_userParameterLong_value(metadata, 'SpecVectorSize')
+
     logging.info("Config: \n%s", config)
  
     # Metadata should be MRD formatted header, but may be a string
@@ -41,12 +176,14 @@ def process(connection, config, metadata):
  
     except:
         logging.info("Improperly formatted metadata: \n%s", metadata)
- 
+
     # Continuously parse incoming data parsed from MRD messages
-    currentSeries = 0
-    acqGroup = []
-    imgGroup = []
-    waveformGroup = []
+    acq_group = []
+    ctr_group = []
+
+    logger_bjs.info("----------------------------------------------------------------------------------------")
+    logger_bjs.info("Start EPSI.py run")
+
     try:
         for item in connection:
             # ----------------------------------------------------------
@@ -54,111 +191,39 @@ def process(connection, config, metadata):
             # ----------------------------------------------------------
             if isinstance(item, ismrmrd.Acquisition):
 
-                # csi_se.cpp code re. encoding indices
-                #
-                # REP - repeats?  - m_adc1.getMDH().setCrep(k);
-                # ACQ - averages? - m_adc1.getMDH().setCacq(j); // averages
-                # LIN - YPhase 50 - m_adc1.getMDH().setClin((short) m_sh_2nd_csi_addr[i] + m_sh_2nd_csi_addr_offset);
-                # PAR - ZPhase 18 - m_adc1.getMDH().setCpar((short) m_sh_3rd_csi_addr[i] + m_sh_3rd_csi_addr_offset);
-                # m_adc1.getMDH().setFirstScanInSlice(!i && !j);
-                # m_adc1.getMDH().setLastScanInSlice(i == (m_lN_csi_encodes - 1) && j == (m_sh_csi_weight[i] - 1));
-                # m_adc1.getMDH().addToEvalInfoMask (MDH_PHASCOR);
-                #
-                # m_adc1.getMDH().setEvalInfoMask(MDH_ONLINE);
-                # ECO - 0/1 Water/Metab m_adc1.getMDH().setCeco(0);     WS vs Water Non-Suppressed
-                # SEG - 100 (50 w/o OS) m_adc1.getMDH().setCseg(ADCctr + +);        EPI RO segment
-                # m_adc1.getMDH().addToEvalInfoMask(MDH_LASTMEASUREDLINE);
+                if block.do_setup:
+                    block.ncha, block.nx = item.data.shape
+                    dims_init = [block.ncha, 1, 1, block.nt, block.nx]
+                    block.data_init_met = np.zeros(dims_init, item.data.dtype)
+                    block.data_init_wat = np.zeros(dims_init, item.data.dtype)
+                    dims = [block.nz, block.ny, block.nt, block.nx]
+                    block.data = []
+                    for i in range(block.ncha):
+                        block.data.append(np.zeros(dims, item.data.dtype))
 
-                #  Write out all flags to see what's what
-                neco = int(metadata.encoding[0].encodingLimits.contrast.maximum - metadata.encoding[0].encodingLimits.contrast.minimum) + 1
-                npar = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_2.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_2.minimum) + 1
-                nlin = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_1.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_1.minimum) + 1
-                nseg = int(metadata.encoding[0].encodingLimits.segment.maximum - metadata.encoding[0].encodingLimits.segment.minimum) + 1
-                nave = int(metadata.encoding[0].encodingLimits.average.maximum - metadata.encoding[0].encodingLimits.average.minimum) + 1
-                nrep = int(metadata.encoding[0].encodingLimits.repetition.maximum - metadata.encoding[0].encodingLimits.repetition.minimum) + 1
+                flag_ctr_kspace = item.user_int[0] > 0
+                flag_last_epi   = item.user_int[1] > 0
 
-                eco = item.idx.contrast
-                par = item.idx.kspace_encode_step_2
-                lin = item.idx.kspace_encode_step_1
-                seg = item.idx.segment
-                ave = item.idx.average
-                rep = item.idx.repetition
-
-                nro = mrdhelper.get_userParameterLong_value(metadata, 'SpecVectorSize')
-                if nro is None:
-                    nro = int((item.data.shape[1] - item.discard_pre - item.discard_post) / 2)  # 2x readout oversampling
-                    logging.warning("Could not find SpecVectorSize in header -- using size %d from data", nro)
-
-                lines = dump_active_flags(item, prnt=False)
-
-                if seg == 511 or seg == 1023 or lines != 'No active flags.':
-                    logging.info("----------------------------------------------------------------------------------------")
-                    logging.info("MRD header: %d/%d eco, %d/%d par, %d/%d lin, %d/%d seg, %d/%d avg, %d/%d rep" % (eco, neco, par, npar, lin, nlin, seg, nseg, ave, nave, rep, nrep))
-                    if lines != 'No active flags.':
-                        logging.info(lines)
+                if flag_ctr_kspace:       # Center of kspace data
+                    ctr_group.append(item)
+                    if flag_last_epi:
+                        process_init(block, ctr_group, config, metadata)
+                        ctr_group = []
+                else:                           # Regular kspace acquisition
+                    acq_group.append(item)
+                    if flag_last_epi:
+                        process_group(block, acq_group, config, metadata)
+                        acq_group = []
 
                 bob = 10
 
-            # # ----------------------------------------------------------
-            # # Image data messages
-            # # ----------------------------------------------------------
-            # elif isinstance(item, ismrmrd.Image):
-            #     # Only process magnitude images -- send phase images back without modification (fallback for images with unknown type)
-            #     if (item.image_type is ismrmrd.IMTYPE_MAGNITUDE) or (item.image_type == 0):
-            #         imgGroup.append(item)
-            #     else:
-            #         tmpMeta = ismrmrd.Meta.deserialize(item.attribute_string)
-            #         tmpMeta['Keep_image_geometry']    = 1
-            #         item.attribute_string = tmpMeta.serialize()
-            #
-            #         connection.send_image(item)
-            #         continue
-            #
-            #     # When this criteria is met, run process_group() on the accumulated
-            #     # data, which returns images that are sent back to the client.
-            #     # e.g. when the series number changes:
-            #     if item.image_series_index != currentSeries:
-            #         logging.info("Processing a group of images because series index changed to %d", item.image_series_index)
-            #         currentSeries = item.image_series_index
-            #         image = process_image(imgGroup, connection, config, metadata)
-            #         connection.send_image(image)
-            #         imgGroup = []
- 
-            # ----------------------------------------------------------
-            # Waveform data messages
-            # ----------------------------------------------------------
-            elif isinstance(item, ismrmrd.Waveform):
-                waveformGroup.append(item)
- 
             elif item is None:
                 break
  
             else:
                 logging.error("Unsupported data  type %s", type(item).__name__)
  
-        # Extract raw ECG waveform data. Basic sorting to make sure that data
-        # is time-ordered, but no additional checking for missing data.
-        # ecgData has shape (5 x timepoints)
-        if len(waveformGroup) > 0:
-            waveformGroup.sort(key = lambda item: item.time_stamp)
-            ecgData = [item.data for item in waveformGroup if item.waveform_id == 0]
-            ecgData = np.concatenate(ecgData,1)
- 
-        # Process any remaining groups of raw or image data.  This can
-        # happen if the trigger condition for these groups are not met.
-        # This is also a fallback for handling image data, as the last
-        # image in a series is typically not separately flagged.
-        if len(acqGroup) > 0:
-            logging.info("Processing a group of k-space data (untriggered)")
-            image = process_raw(acqGroup, connection, config, metadata)
-            connection.send_image(image)
-            acqGroup = []
- 
-        if len(imgGroup) > 0:
-            logging.info("Processing a group of images (untriggered)")
-            image = process_image(imgGroup, connection, config, metadata)
-            connection.send_image(image)
-            imgGroup = []
+        bob = 10
  
     except Exception as e:
         logging.error(traceback.format_exc())
@@ -166,7 +231,51 @@ def process(connection, config, metadata):
  
     finally:
         connection.send_close()
- 
+
+
+def process_init(block, group, config, metadata):
+    """ Format data into a [cha RO ave lin seg] array """
+
+    indz = [item.idx.kspace_encode_step_2 for item in group]
+    indy = [item.idx.kspace_encode_step_1 for item in group]
+    indt = list(range(block.nt))
+
+    if len(set(indz)) > 1:
+        logger_bjs.info("Too many Z encodes in Init data group")
+    if len(set(indy)) > 1:
+        logger_bjs.info("Too many Y encodes in Init data group")
+
+    if group[0].idx.contrast == 0:
+        for acq, it in zip(group, indt):
+            block.data_init_met[:, 0, 0, it, :] = acq.data
+    else:
+        for acq, it in zip(group, indt):
+            block.data_init_wat[:, 0, 0, it, :] = acq.data
+
+
+
+
+
+def process_group(block, group, config, metadata):
+
+    indz = [item.idx.kspace_encode_step_2 for item in group]
+    indy = [item.idx.kspace_encode_step_1 for item in group]
+    indt = list(range(block.nt))
+
+    if len(set(indz)) > 1:
+        logger_bjs.info("Too many Z encodes in TR data group")
+    if len(set(indy)) > 1:
+        logger_bjs.info("Too many Y encodes in TR data group")
+
+    for acq, iz, iy, it in zip(group, indz, indy, indt):
+        for i in range(block.ncha):
+            block.data[i][iz, iy, it, :] = acq.data[i,:]
+
+    #logging.info("Incoming epsi data is shape %s" % (acq.data[0,:].shape,))
+
+
+
+
 
 def process_raw(group, connection, config, metadata):
     # Format data into a [cha RO ave lin seg] array
