@@ -120,12 +120,14 @@ class BlockEpsi:
         self.echo_shifts        = None
         self.echo_phases        = None
         self.Is_GE              = False
+        self.last_indx_z        = 0
 
         # data storage
 
         self.data_init_met = None
         self.data_init_wat = None
-        self.data = []
+        self.water = []
+        self.metab = []
 
     @property
     def n_channels(self):
@@ -197,14 +199,17 @@ def process(connection, config, metadata):
                     block.data_init_met = np.zeros(dims_init, item.data.dtype)
                     block.data_init_wat = np.zeros(dims_init, item.data.dtype)
                     dims = [block.nz, block.ny, block.nt, block.nx]
-                    block.data = []
+                    block.water = []
+                    block.metab = []
                     for i in range(block.ncha):
-                        block.data.append(np.zeros(dims, item.data.dtype))
+                        block.water.append(np.zeros(dims, item.data.dtype))
+                        block.metab.append(np.zeros(dims, item.data.dtype))
+                    block.do_setup = False
 
                 flag_ctr_kspace = item.user_int[0] > 0
                 flag_last_epi   = item.user_int[1] > 0
 
-                if flag_ctr_kspace:       # Center of kspace data
+                if flag_ctr_kspace:             # Center of kspace data
                     ctr_group.append(item)
                     if flag_last_epi:
                         process_init(block, ctr_group, config, metadata)
@@ -255,21 +260,36 @@ def process_init(block, group, config, metadata):
 
 
 
-
 def process_group(block, group, config, metadata):
 
     indz = [item.idx.kspace_encode_step_2 for item in group]
     indy = [item.idx.kspace_encode_step_1 for item in group]
     indt = list(range(block.nt))
 
-    if len(set(indz)) > 1:
+    index_z = list(set(indz))
+    index_y = list(set(indy))
+
+    if len(index_z) > 1:
         logger_bjs.info("Too many Z encodes in TR data group")
-    if len(set(indy)) > 1:
+    if len(index_y) > 1:
         logger_bjs.info("Too many Y encodes in TR data group")
 
     for acq, iz, iy, it in zip(group, indz, indy, indt):
         for i in range(block.ncha):
-            block.data[i][iz, iy, it, :] = acq.data[i,:]
+            if group[0].idx.contrast == 0:
+                block.metab[i][iz, iy, it, :] = acq.data[i,:]
+            else:
+                block.water[i][iz, iy, it, :] = acq.data[i,:]
+
+    if block.last_indx_z != int(index_z[0]):
+        bob = 11
+        print(" ***** doing something with Z chunk = "+str(index_z[0]))
+        # do some z slice processing here
+        #
+        # or send off a z slice here
+
+
+    block.last_indx_z = int(index_z[0])
 
     #logging.info("Incoming epsi data is shape %s" % (acq.data[0,:].shape,))
 
