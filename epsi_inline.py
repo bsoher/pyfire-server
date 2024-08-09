@@ -93,7 +93,7 @@ class BlockEpsi:
         self.fovx               = 280.0
         self.fovy               = 280.0
         self.fovz               = 180.0
-        self.ncha               = 1
+        self.ncha               = 12
         self.n_process_nodes    = 1
         self.data_id_array      = []
         self.nx_resample        = 50
@@ -108,7 +108,6 @@ class BlockEpsi:
         self.pix_spacing_1      = 5.6
         self.pix_spacing_2      = 5.6
         self.pix_spacing_3      = 10.0
-        self.nchannels          = 12
         self.mrdata             = None
         self.out_filename       = ''
         self.save_output        = True
@@ -120,7 +119,7 @@ class BlockEpsi:
         self.echo_shifts        = None
         self.echo_phases        = None
         self.Is_GE              = False
-        self.last_indx_z        = 0
+        self.last_zindx        = 0
 
         # data storage
 
@@ -136,9 +135,27 @@ class BlockEpsi:
     def n_channels(self, value):
         self.ncha = value
 
+    @property
+    def nchannels(self):
+        return self.ncha
+    @nchannels.setter
+    def nchannels(self, value):
+        self.ncha = value
+
 
 def process(connection, config, metadata):
     """
+    This version is same as the ICE 'Raw' selection. Data is store frame
+    by frame to the DICOM database with just raw k-space data in it.
+
+    Input from server is a group of data from each ADC, this method will
+    collate the EPI readouts into one group for Metab signals and another
+    group for Water signals that comprise one TR acquisition.  Data will
+    be saved to one of two arrays that hold all the (nt, nt, nx) encodes
+    for one Z phase encode of data. When that array is full, it will be
+    sent back from FIRE for storage in the database. And a new array of
+    data will be collated.
+
         csi_se.cpp code re. encoding indices
 
         PAR - ZPhase 18 - m_adc1.getMDH().setCpar((short) m_sh_3rd_csi_addr[i] + m_sh_3rd_csi_addr_offset);
@@ -152,10 +169,6 @@ def process(connection, config, metadata):
     """
 
     block = BlockEpsi()
-
-    block.nz = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_2.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_2.minimum) + 1
-    block.ny = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_1.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_1.minimum) + 1
-    block.nt = mrdhelper.get_userParameterLong_value(metadata, 'SpecVectorSize')
 
     logging.info("Config: \n%s", config)
  
@@ -175,9 +188,16 @@ def process(connection, config, metadata):
             metadata.encoding[0].encodedSpace.fieldOfView_mm.x,
             metadata.encoding[0].encodedSpace.fieldOfView_mm.y,
             metadata.encoding[0].encodedSpace.fieldOfView_mm.z)
- 
+
+        block.nz = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_2.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_2.minimum) + 1
+        block.ny = int(metadata.encoding[0].encodingLimits.kspace_encoding_step_1.maximum - metadata.encoding[0].encodingLimits.kspace_encoding_step_1.minimum) + 1
+        block.nt = mrdhelper.get_userParameterLong_value(metadata, 'SpecVectorSize')
+        block.fovx = metadata.encoding[0].encodedSpace.fieldOfView_mm.x
+        block.fovy = metadata.encoding[0].encodedSpace.fieldOfView_mm.y
+        block.fovz = metadata.encoding[0].encodedSpace.fieldOfView_mm.z
+
     except:
-        logging.info("Improperly formatted metadata: \n%s", metadata)
+        logging.info("Improperly formatted metadata or auxiliary variables: \n%s", metadata)
 
     # Continuously parse incoming data parsed from MRD messages
     acq_group = []
@@ -195,19 +215,23 @@ def process(connection, config, metadata):
 
                 if block.do_setup:
                     block.ncha, block.nx = item.data.shape
+
                     dims_init = [block.ncha, 1, 1, block.nt, block.nx]
                     block.data_init_met = np.zeros(dims_init, item.data.dtype)
                     block.data_init_wat = np.zeros(dims_init, item.data.dtype)
+
                     dims = [block.nz, block.ny, block.nt, block.nx]
                     block.water = []
                     block.metab = []
                     for i in range(block.ncha):
                         block.water.append(np.zeros(dims, item.data.dtype))
                         block.metab.append(np.zeros(dims, item.data.dtype))
+
                     block.do_setup = False
 
-                flag_ctr_kspace = item.user_int[0] > 0
-                flag_last_epi   = item.user_int[1] > 0
+                flag_ctr_kspace   = item.user_int[0] > 0
+                flag_last_epi     = item.user_int[1] > 0
+                flag_last_yencode = item.idx.kspace_encode_step_1 == block.ny-1
 
                 if flag_ctr_kspace:             # Center of kspace data
                     ctr_group.append(item)
@@ -218,6 +242,13 @@ def process(connection, config, metadata):
                     acq_group.append(item)
                     if flag_last_epi:
                         process_group(block, acq_group, config, metadata)
+
+                        if item.idx.contrast == 1 and flag_last_yencode:
+                            logger_bjs.info("**** bjs - send_raw() -- zindx = %d, yindx = %d " % (item.idx.kspace_encode_step_2, item.idx.kspace_encode_step_1))
+                            images = send_raw(block, acq_group, connection, config, metadata)
+                            connection.send_image(images)
+                            block.last_zindx += 1
+
                         acq_group = []
 
                 bob = 10
@@ -227,8 +258,6 @@ def process(connection, config, metadata):
  
             else:
                 logging.error("Unsupported data  type %s", type(item).__name__)
- 
-        bob = 10
  
     except Exception as e:
         logging.error(traceback.format_exc())
@@ -280,21 +309,69 @@ def process_group(block, group, config, metadata):
                 block.metab[i][iz, iy, it, :] = acq.data[i,:]
             else:
                 block.water[i][iz, iy, it, :] = acq.data[i,:]
-
-    if block.last_indx_z != int(index_z[0]):
-        bob = 11
-        print(" ***** doing something with Z chunk = "+str(index_z[0]))
-        # do some z slice processing here
-        #
-        # or send off a z slice here
+    return
 
 
-    block.last_indx_z = int(index_z[0])
+def send_raw(block, group, connection, config, metadata):
 
-    #logging.info("Incoming epsi data is shape %s" % (acq.data[0,:].shape,))
+    zindx = block.last_zindx
+    images = []
 
+    # Set ISMRMRD Meta Attributes
+    tmpMeta = ismrmrd.Meta()
+    tmpMeta['DataRole'] = 'Spectroscopy'
+    tmpMeta['ImageProcessingHistory'] = ['FIRE', 'SPECTRO', 'PYTHON']
+    tmpMeta['Keep_image_geometry'] = 1
+    tmpMeta['SiemensControl_SpectroData'] = ['bool', 'true']
 
+    # Change dwell time to account for removal of readout oversampling
+    dwellTime = mrdhelper.get_userParameterDouble_value(metadata, 'DwellTime_0')  # in ms
 
+    if dwellTime is None:
+        logging.error("Could not find DwellTime_0 in MRD header")
+    else:
+        logging.info("Found acquisition dwell time from header: " + str(dwellTime * 1000))
+        tmpMeta['SiemensDicom_RealDwellTime'] = ['int', str(int(dwellTime * 1000 * 2))]
+
+    xml = tmpMeta.serialize()
+    logging.debug("Image MetaAttributes: %s", xml)
+
+    for icha in range(block.ncha):
+        # Create new MRD instance for the processed image
+        # from_array() should be called with 'transpose=False' to avoid warnings, and when called
+        # with this option, can take input as: [cha z y x], [z y x], [y x], or [x]
+        # For spectroscopy data, dimensions are: [z y t], i.e. [SEG LIN COL] (PAR would be 3D)
+
+        metab = block.metab[icha][zindx, :,:,:].copy()
+        water = block.water[icha][zindx, :,:,:].copy()
+
+        ms = metab.shape
+        ws = water.shape
+        metab.shape = ms[0], ms[1] * ms[2]
+        water.shape = ws[0], ws[1] * ws[2]
+
+        tmpImgMet = ismrmrd.Image.from_array(metab, transpose=False)
+        tmpImgWat = ismrmrd.Image.from_array(water, transpose=False)
+
+        # Set the header information
+        tmpImgMet.setHead(mrdhelper.update_img_header_from_raw(tmpImgMet.getHead(), group[0].getHead()))
+        tmpImgWat.setHead(mrdhelper.update_img_header_from_raw(tmpImgWat.getHead(), group[0].getHead()))
+
+        # 2D spectroscopic imaging
+        tmpImgMet.field_of_view = (ctypes.c_float(block.fovx),ctypes.c_float(block.fovy),ctypes.c_float(block.fovz))
+        tmpImgWat.field_of_view = (ctypes.c_float(block.fovx),ctypes.c_float(block.fovy),ctypes.c_float(block.fovz))
+
+        tmpImgMet.image_index = 1
+        tmpImgWat.image_index = 1
+# bjs    tmpImg.flags = 2 ** 5  # IMAGE_LAST_IN_AVERAGE
+
+        tmpImgMet.attribute_string = xml
+        tmpImgWat.attribute_string = xml
+
+        images.append(tmpImgMet)
+        images.append(tmpImgWat)
+
+    return images
 
 
 def process_raw(group, connection, config, metadata):
