@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 
 # bjs imports
 from logging import FileHandler, Formatter
+from pymidas_inline.epsi.do_epsi import do_init, do_epsi
 
 BJS_DEBUG_PATH = "D:\\temp\\debug_fire\\"
 LOG_FORMAT = ('%(asctime)s | %(levelname)s | %(message)s')
@@ -254,10 +255,6 @@ def process(connection, config, metadata):
                         block.nx2 = int(block.nx // 2)
                         block.nt2 = int(block.nt // 2)
 
-                        dims_init = [block.ncha, 1, 1, block.nt, block.nx]
-                        block.metab_init = np.zeros(dims_init, item.data.dtype)
-                        block.water_init = np.zeros(dims_init, item.data.dtype)
-
                         dims = [block.nz, block.ny, block.nx2, block.nt2]
                         block.water = []
                         block.metab = []
@@ -326,7 +323,7 @@ def process_group_raw(block, group, config, metadata):
 
 def send_raw(block, group, connection, config, metadata):
 
-    zindx = block.last_zindx
+    zindx = block.last_zindx   # TODO bjs - what range do we take?
     images = []
 
     # Set ISMRMRD Meta Attributes
@@ -354,7 +351,7 @@ def send_raw(block, group, connection, config, metadata):
         # with this option, can take input as: [cha z y x], [z y x], [y x], or [x]
         # For spectroscopy data, dimensions are: [z y t], i.e. [SEG LIN COL] (PAR would be 3D)
 
-        metab = block.metab[icha][zindx, :,:,:].copy()
+        metab = block.metab[icha][zindx, :,:,:].copy()      # TODO bjs - what range do we take?
         water = block.water[icha][zindx, :,:,:].copy()
 
         ms = metab.shape
@@ -397,15 +394,16 @@ def process_init_epsi(block, group, config, metadata):
     if len(set(indy)) > 1:
         logger_bjs.info("Too many Y encodes in Init data group")
 
-    if group[0].idx.contrast == 0:
+    if group[0].idx.contrast == 1:
+        water_init = np.zeros([block.ncha, block.nt, block.nx], group[0].data.dtype)
         for acq, it in zip(group, indt):
-            block.metab_init[:, 0, 0, it, :] = acq.data
-    else:
-        for acq, it in zip(group, indt):
-            block.water_init[:, 0, 0, it, :] = acq.data
+            water_init[:, it, :] = acq.data
+        do_init(block, water_init)
+    # else:
+    #    don't care about METAB center of kspace
 
 
-def process_group_epsi(block, group, config, metadata):
+def process_group_epsi(block, group):
 
     indz = [item.idx.kspace_encode_step_2 for item in group]
     indy = [item.idx.kspace_encode_step_1 for item in group]
@@ -413,36 +411,17 @@ def process_group_epsi(block, group, config, metadata):
 
     indxz = list(set(indz))
     indxy = list(set(indy))
+    ieco = group[0].idx.contrast
 
     if len(indxz) > 1:
         logger_bjs.info("Too many Z encodes in TR data group")
     if len(indxy) > 1:
         logger_bjs.info("Too many Y encodes in TR data group")
 
-    for acq, iz, iy, it in zip(group, indz, indy, indt):
-        for i in range(block.ncha):
-            block.tmp[i, it, :] = acq.data[i,:]
+    for acq, it in zip(group, indt):
+        block.tmp[:, it, :] = acq.data
 
-    data_in = block.tmp
-
-    data_in = interp_kx(block, data_in, xino, xine, ichan)
-    data_in = kx_phase_corr(block, data_in, echo_phase)
-    data_out, nx_out = process_kt(block, data_in, data_out, expo, expe)
-
-    # Correction for frequency drift
-    if block.frequency_drift_corr > 0:
-        apply_freq_drift(block, data_out, nx_out)
-
-    if block.swap_lr:
-        for iz in range(nz):
-            for ix in range(nx):
-                for it in range(nt2):
-                    tmp = np.roll(np.fliplr(np.squeeze(data_out[iz,:,ix,it])))
-                    tmp[0] = 0+0j
-                    data_out[iz, :, ix, it] = tmp
-
-    if block.invert_z:
-        data_out = data_out[::-1, :, :, :]
+    data_out = do_epsi(block, indxy, indxz, ieco)
 
     # save to shared_mem space here for each channel
 
@@ -453,12 +432,6 @@ def process_group_epsi(block, group, config, metadata):
         else:
             block.water[i][indxz, indxy, :, :] = data_out[i, :, :]  # dims should be cha,x,t here
 
-
-
-
-
-
-
     return
 
 
@@ -466,7 +439,33 @@ def send_epsi(block, group, connection, config, metadata):
 
     # NOT DONE -- NOT DONE -- NOT DONE -- NOT DONE -- NOT DONE -- NOT DONE --
 
-    zindx = block.last_zindx
+    # May have to wait until all data processed to do these 2 steps, then
+    # send all data to database??? bjs  From do_epsi.do_epsi()
+
+    nt, nx, ny, nz = block.nt, block.nx, block.ny, block.nz
+    nx2 = int(nx / 2)  # size of regridded data
+    nt2 = int(nt / 2)
+
+    if block.set.swap_lr:
+        for ichan in range(block.ncha):
+            for z in range(nz):
+                for x in range(nx2):
+                    for t in range(nt2):
+                        tmp = np.fliplr(np.squeeze(block.water[ichan][z, :, x, t]))
+                        tmp[0] = 0 + 0j     # bjs - may not need this?
+                        block.water[ichan][z, :, x, t] = tmp
+
+                        tmp = np.fliplr(np.squeeze(block.metab[ichan][z, :, x, t]))
+                        tmp[0] = 0 + 0j     # bjs - may not need this?
+                        block.metab[ichan][z, :, x, t] = tmp
+
+
+    if block.set.invert_z:
+        for ichan in range(block.ncha):
+            block.water[ichan][:, :, :, :] = block.water[ichan][::-1, :, :, :]
+            block.metab[ichan][:, :, :, :] = block.metab[ichan][::-1, :, :, :]
+
+    zindx = block.last_zindx        # TODO bjs - what range do we take?
     images = []
 
     # Set ISMRMRD Meta Attributes
@@ -494,7 +493,7 @@ def send_epsi(block, group, connection, config, metadata):
         # with this option, can take input as: [cha z y x], [z y x], [y x], or [x]
         # For spectroscopy data, dimensions are: [z y t], i.e. [SEG LIN COL] (PAR would be 3D)
 
-        metab = block.metab[icha][zindx, :,:,:].copy()
+        metab = block.metab[icha][zindx, :,:,:].copy()      # TODO bjs - what range do we take?
         water = block.water[icha][zindx, :,:,:].copy()
 
         ms = metab.shape
